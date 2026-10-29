@@ -1,0 +1,382 @@
+name: Build Shorts BT Controller APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Project Folders & Files Automatically
+        run: |
+          python3 - << 'EOF'
+          import os, zipfile, textwrap
+
+          # If user uploaded ShortsBTController_Project.zip as a single file, extract it
+          if os.path.exists("ShortsBTController_Project.zip"):
+              with zipfile.ZipFile("ShortsBTController_Project.zip", "r") as zf:
+                  zf.extractall(".")
+              print("Extracted ShortsBTController_Project.zip")
+
+          files = {
+              "settings.gradle.kts": '''pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ShortsBTController"
+          include(":app")
+          ''',
+              "build.gradle.kts": '''plugins {
+              id("com.android.application") version "8.3.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          ''',
+              "gradle.properties": '''org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          ''',
+              "app/build.gradle.kts": '''plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.shortsbtcontroller"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.shortsbtcontroller"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+          }
+          ''',
+              "app/src/main/AndroidManifest.xml": '''<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Shorts BT Controller"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ShortsAccessibilityService"
+                      android:exported="false"
+                      android:label="Shorts Bluetooth Button Scroller"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          ''',
+              "app/src/main/res/xml/accessibility_service_config.xml": '''<?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestFilterKeyEvents"
+              android:canPerformGestures="true"
+              android:canRequestFilterKeyEvents="true"
+              android:description="@string/accessibility_service_description"
+              android:notificationTimeout="50" />
+          ''',
+              "app/src/main/res/values/strings.xml": '''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Shorts BT Controller</string>
+              <string name="accessibility_service_description">Scrolls YouTube Shorts up or down when you press Next, Previous, or Volume buttons on your connected Bluetooth speaker.</string>
+          </resources>
+          ''',
+              "app/src/main/java/com/example/shortsbtcontroller/MainActivity.kt": '''package com.example.shortsbtcontroller
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Path
+          import android.media.AudioDeviceInfo
+          import android.media.AudioManager
+          import android.media.session.MediaSession
+          import android.media.session.PlaybackState
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.KeyEvent
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.Switch
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var audioManager: AudioManager
+              private var mediaSession: MediaSession? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 64, 48, 64)
+                  }
+
+                  val statusText = TextView(this).apply {
+                      text = "Shorts Bluetooth Controller\n\n" +
+                          "Step 1: Tap 'Enable Accessibility Service' and turn on 'Shorts Bluetooth Button Scroller'.\n\n" +
+                          "Step 2: Turn on 'Route Audio to Phone Speaker' so sound plays from your phone while Bluetooth speaker buttons remain active."
+                      textSize = 16f
+                      setPadding(0, 0, 0, 48)
+                  }
+
+                  val btnAccessibility = Button(this).apply {
+                      text = "1. Enable Accessibility Service"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  }
+
+                  val switchSpeakerAudio = Switch(this).apply {
+                      text = "2. Route Audio to Phone Built-in Speaker"
+                      textSize = 16f
+                      setPadding(0, 48, 0, 48)
+                      setOnCheckedChangeListener { _, isChecked ->
+                          routeAudioToPhoneSpeaker(isChecked)
+                      }
+                  }
+
+                  layout.addView(statusText)
+                  layout.addView(btnAccessibility)
+                  layout.addView(switchSpeakerAudio)
+                  setContentView(layout)
+
+                  setupMediaButtonSession()
+              }
+
+              private fun routeAudioToPhoneSpeaker(forcePhoneSpeaker: Boolean) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      if (forcePhoneSpeaker) {
+                          val builtInSpeaker = audioManager.availableCommunicationDevices.firstOrNull {
+                              it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                          }
+                          if (builtInSpeaker != null) {
+                              audioManager.setCommunicationDevice(builtInSpeaker)
+                              Toast.makeText(this, "Audio routed to phone speaker", Toast.LENGTH_SHORT).show()
+                          }
+                      } else {
+                          audioManager.clearCommunicationDevice()
+                          Toast.makeText(this, "Audio routing reset to default", Toast.LENGTH_SHORT).show()
+                      }
+                  } else {
+                      @Suppress("DEPRECATION")
+                      audioManager.isSpeakerphoneOn = forcePhoneSpeaker
+                      Toast.makeText(
+                          this,
+                          if (forcePhoneSpeaker) "Speakerphone enabled" else "Speakerphone disabled",
+                          Toast.LENGTH_SHORT
+                      ).show()
+                  }
+              }
+
+              private fun setupMediaButtonSession() {
+                  mediaSession = MediaSession(this, "ShortsBTControllerSession").apply {
+                      setCallback(object : MediaSession.Callback() {
+                          override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                              val event = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                  mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                              } else {
+                                  @Suppress("DEPRECATION")
+                                  mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                              }
+                              if (event?.action == KeyEvent.ACTION_DOWN) {
+                                  when (event.keyCode) {
+                                      KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                          ShortsAccessibilityService.instance?.swipeShorts(scrollNext = true)
+                                          return true
+                                      }
+                                      KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                          ShortsAccessibilityService.instance?.swipeShorts(scrollNext = false)
+                                          return true
+                                      }
+                                  }
+                              }
+                              return super.onMediaButtonEvent(mediaButtonIntent)
+                          }
+                      })
+                      val state = PlaybackState.Builder()
+                          .setActions(
+                              PlaybackState.ACTION_SKIP_TO_NEXT or
+                                  PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                                  PlaybackState.ACTION_PLAY_PAUSE
+                          )
+                          .setState(PlaybackState.STATE_PLAYING, 0, 1.0f)
+                          .build()
+                      setPlaybackState(state)
+                      isActive = true
+                  }
+              }
+
+              override fun onDestroy() {
+                  mediaSession?.release()
+                  super.onDestroy()
+              }
+          }
+
+          class ShortsAccessibilityService : AccessibilityService() {
+
+              companion object {
+                  var instance: ShortsAccessibilityService? = null
+                  private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
+              }
+
+              private var currentForegroundPackage: String = ""
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      event.packageName?.toString()?.let { pkg ->
+                          currentForegroundPackage = pkg
+                      }
+                  }
+              }
+
+              override fun onKeyEvent(event: KeyEvent): Boolean {
+                  if (currentForegroundPackage != YOUTUBE_PACKAGE) {
+                      return false
+                  }
+
+                  if (event.action == KeyEvent.ACTION_DOWN) {
+                      when (event.keyCode) {
+                          KeyEvent.KEYCODE_MEDIA_NEXT,
+                          KeyEvent.KEYCODE_VOLUME_UP -> {
+                              swipeShorts(scrollNext = true)
+                              return true
+                          }
+                          KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                          KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                              swipeShorts(scrollNext = false)
+                              return true
+                          }
+                      }
+                  }
+                  return super.onKeyEvent(event)
+              }
+
+              fun swipeShorts(scrollNext: Boolean) {
+                  val metrics = resources.displayMetrics
+                  val centerX = metrics.widthPixels / 2f
+                  val startY = if (scrollNext) metrics.heightPixels * 0.75f else metrics.heightPixels * 0.25f
+                  val endY = if (scrollNext) metrics.heightPixels * 0.25f else metrics.heightPixels * 0.75f
+
+                  val swipePath = Path().apply {
+                      moveTo(centerX, startY)
+                      lineTo(centerX, endY)
+                  }
+
+                  val gesture = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(swipePath, 0L, 180L))
+                      .build()
+
+                  dispatchGesture(gesture, null, null)
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  if (instance == this) instance = null
+                  super.onDestroy()
+              }
+          }
+          '''
+          }
+
+          for path, content in files.items():
+              if os.path.dirname(path):
+                  os.makedirs(os.path.dirname(path), exist_ok=True)
+              cleaned = textwrap.dedent(content)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(cleaned.strip() + "\n")
+          print("Generated all Android project files successfully.")
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Debug APK
+        run: gradle assembleDebug
+
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShortsBTController-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
